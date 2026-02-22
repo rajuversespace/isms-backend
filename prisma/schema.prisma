@@ -70,6 +70,21 @@ enum AuditType {
   INTERNAL
   EXTERNAL
   SURVEILLANCE
+  RECERTIFICATION
+}
+
+enum AuditStatus {
+  DRAFT
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum AuditControlStatus {
+  PENDING
+  REVIEWED
+  FLAGGED
+  NOT_APPLICABLE
 }
 
 enum FindingSeverity {
@@ -295,6 +310,7 @@ model Control {
   riskMappings   RiskTreatment[]
   findings       AuditFinding[]
   testMappings   TestControl[]
+  auditControls  AuditControl[]
 }
 
 /////////////////////////
@@ -339,18 +355,43 @@ model Policy {
 /////////////////////////
 
 model Audit {
-  id             String    @id @default(uuid())
-  type           AuditType
-  auditor        String
-  scope          String
-  startDate      DateTime
-  endDate        DateTime?
-  organizationId String
-  createdAt      DateTime  @default(now())
+  id                   String      @id @default(uuid())
+  name                 String
+  type                 AuditType
+  frameworkName        String?     // e.g. "ISO 27001:2022", free-text
+  periodStart          DateTime?
+  periodEnd            DateTime?
+  startDate            DateTime
+  endDate              DateTime?
+  status               AuditStatus @default(DRAFT)
+  assignedAuditorId    String?     // internal user id
+  externalAuditorEmail String?
+  ownerId              String
+  organizationId       String
+  createdAt            DateTime    @default(now())
+  closedAt             DateTime?
 
-  organization   Organization @relation(fields: [organizationId], references: [id])
+  organization   Organization   @relation(fields: [organizationId], references: [id])
   findings       AuditFinding[]
   testMappings   TestAudit[]
+  auditControls  AuditControl[]
+}
+
+model AuditControl {
+  id           String             @id @default(uuid())
+  auditId      String
+  controlId    String
+  reviewStatus AuditControlStatus @default(PENDING)
+  reviewedBy   String?
+  reviewedAt   DateTime?
+  notes        String?
+
+  audit   Audit   @relation(fields: [auditId], references: [id], onDelete: Cascade)
+  control Control @relation(fields: [controlId], references: [id], onDelete: Cascade)
+
+  @@unique([auditId, controlId])
+  @@index([auditId])
+  @@index([controlId])
 }
 
 model AuditFinding {

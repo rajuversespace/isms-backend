@@ -222,24 +222,24 @@ export async function reportRoutes(fastify: FastifyInstance) {
         orderBy: { startDate: 'desc' },
       });
 
-      const completed  = audits.filter(a => a.endDate && a.endDate <= end);
-      const inProgress = audits.filter(a => !a.endDate || a.endDate > end);
+      const completed  = audits.filter((a: any) => a.status === 'COMPLETED');
+      const inProgress = audits.filter((a: any) => a.status === 'IN_PROGRESS');
 
-      const allFindings = audits.flatMap(a => a.findings);
-      const openFindings   = allFindings.filter(f => f.status === 'OPEN').length;
-      const closedFindings = allFindings.filter(f => f.status === 'CLOSED').length;
+      const allFindings = audits.flatMap((a: any) => a.findings);
+      const openFindings   = allFindings.filter((f: any) => f.status === 'OPEN').length;
+      const closedFindings = allFindings.filter((f: any) => f.status === 'CLOSED').length;
 
-      const auditRows = audits.map(a => ({
+      const auditRows = audits.map((a: any) => ({
         id:         a.id,
         type:       a.type,
-        auditor:    a.auditor,
-        scope:      a.scope,
+        auditor:    a.externalAuditorEmail ?? a.assignedAuditorId ?? '—',
+        scope:      a.frameworkName ?? a.name,
         startDate:  a.startDate,
         endDate:    a.endDate,
-        status:     a.endDate && a.endDate <= new Date() ? 'Completed' : 'In Progress',
-        major:      a.findings.filter(f => f.severity === 'MAJOR').length,
-        minor:      a.findings.filter(f => f.severity === 'MINOR').length,
-        observation: a.findings.filter(f => f.severity === 'OBSERVATION').length,
+        status:     a.status === 'COMPLETED' ? 'Completed' : 'In Progress',
+        major:      a.findings.filter((f: any) => f.severity === 'MAJOR').length,
+        minor:      a.findings.filter((f: any) => f.severity === 'MINOR').length,
+        observation: a.findings.filter((f: any) => f.severity === 'OBSERVATION').length,
       }));
 
       return reply.send({
