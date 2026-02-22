@@ -82,8 +82,8 @@ enum AuditStatus {
 
 enum AuditControlStatus {
   PENDING
-  REVIEWED
-  FLAGGED
+  COMPLIANT
+  NON_COMPLIANT
   NOT_APPLICABLE
 }
 
