@@ -107,17 +107,17 @@ const updateAuditControlSchema = z.object({
 
 const createFindingSchema = z.object({
   controlId:   z.string().uuid(),
-  severity:    z.enum(['MINOR', 'MAJOR', 'OBSERVATION']),
+  severity:    z.enum(['MINOR', 'MAJOR', 'OBSERVATION', 'OFI']),
   description: z.string().min(1),
   remediation: z.string().optional(),
-  status:      z.string().default('OPEN'),
+  status:      z.enum(['OPEN', 'IN_REMEDIATION', 'READY_FOR_REVIEW', 'CLOSED']).default('OPEN'),
 });
 
 const updateFindingSchema = z.object({
-  severity:    z.enum(['MINOR', 'MAJOR', 'OBSERVATION']).optional(),
+  severity:    z.enum(['MINOR', 'MAJOR', 'OBSERVATION', 'OFI']).optional(),
   description: z.string().min(1).optional(),
   remediation: z.string().optional(),
-  status:      z.string().optional(),
+  status:      z.enum(['OPEN', 'IN_REMEDIATION', 'READY_FOR_REVIEW', 'CLOSED']).optional(),
 });
 
 // ── Helper: verify audit belongs to org (and optionally to auditor) ───────────
@@ -371,12 +371,13 @@ export async function auditRoutes(app: FastifyInstance) {
 
     const finding = await prisma.auditFinding.create({
       data: {
-        auditId:     id,
-        controlId:   body.data.controlId,
-        severity:    body.data.severity as any,
-        description: body.data.description,
-        remediation: body.data.remediation,
-        status:      body.data.status,
+        auditId:        id,
+        controlId:      body.data.controlId,
+        organizationId: user.organizationId,
+        severity:       body.data.severity as any,
+        description:    body.data.description,
+        remediationPlan: body.data.remediation,
+        status:         body.data.status as any,
       },
       include: {
         control: { select: { id: true, isoReference: true, title: true } },
@@ -401,9 +402,15 @@ export async function auditRoutes(app: FastifyInstance) {
     const finding = await prisma.auditFinding.findFirst({ where: { id: fid, auditId: id } });
     if (!finding) return reply.status(404).send({ error: 'Finding not found' });
 
+    const updateData: any = {};
+    if (body.data.severity    !== undefined) updateData.severity        = body.data.severity;
+    if (body.data.description !== undefined) updateData.description     = body.data.description;
+    if (body.data.remediation !== undefined) updateData.remediationPlan = body.data.remediation;
+    if (body.data.status      !== undefined) updateData.status          = body.data.status;
+
     const updated = await prisma.auditFinding.update({
       where: { id: fid },
-      data:  body.data,
+      data:  updateData,
       include: { control: { select: { id: true, isoReference: true, title: true } } },
     });
 

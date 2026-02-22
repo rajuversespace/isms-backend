@@ -29,6 +29,7 @@ import { agentRoutes } from './modules/agent/routes';
 import { onboardingRoutes } from './modules/onboarding/routes';
 import { testRoutes } from './modules/tests/routes';
 import { reportRoutes } from './modules/reports/routes';
+import { findingRoutes } from './modules/findings/routes';
 
 export const app: FastifyInstance = Fastify({
   logger: {
@@ -100,6 +101,7 @@ app.register(agentRoutes,       { prefix: '/api/agent' });
 app.register(onboardingRoutes,  { prefix: '/api/onboarding' });
 app.register(testRoutes,        { prefix: '/api/tests' });
 app.register(reportRoutes,      { prefix: '/api/reports' });
+app.register(findingRoutes,     { prefix: '/api/findings' });
 
 // Health check
 app.get('/health', async () => {

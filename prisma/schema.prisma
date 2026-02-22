@@ -91,6 +91,14 @@ enum FindingSeverity {
   MINOR
   MAJOR
   OBSERVATION
+  OFI
+}
+
+enum FindingStatus {
+  OPEN
+  IN_REMEDIATION
+  READY_FOR_REVIEW
+  CLOSED
 }
 
 /////////////////////////
@@ -120,11 +128,12 @@ model User {
   organizationId String
   createdAt      DateTime @default(now())
 
-  organization   Organization    @relation(fields: [organizationId], references: [id])
-  activityLogs   ActivityLog[]
-  gitAccounts    UserGitAccount[]
-  onboarding     UserOnboarding?
-  ownedTests     Test[]          @relation("TestOwner")
+  organization       Organization    @relation(fields: [organizationId], references: [id])
+  activityLogs       ActivityLog[]
+  gitAccounts        UserGitAccount[]
+  onboarding         UserOnboarding?
+  ownedTests         Test[]          @relation("TestOwner")
+  assignedFindings   AuditFinding[]  @relation("FindingAssignee")
 }
 
 /////////////////////////
@@ -395,17 +404,27 @@ model AuditControl {
 }
 
 model AuditFinding {
-  id          String          @id @default(uuid())
-  auditId    String
-  controlId  String
-  severity   FindingSeverity
-  description String
-  remediation String?
-  status      String
-  createdAt   DateTime        @default(now())
+  id              String          @id @default(uuid())
+  auditId         String
+  controlId       String
+  organizationId  String
+  severity        FindingSeverity
+  status          FindingStatus   @default(OPEN)
+  description     String
+  remediationPlan String?
+  dueDate         DateTime?
+  assignedTo      String?         // FK → User.id
+  evidenceUrl     String?
+  createdAt       DateTime        @default(now())
+  closedAt        DateTime?
 
-  audit       Audit   @relation(fields: [auditId], references: [id])
-  control     Control @relation(fields: [controlId], references: [id])
+  audit    Audit   @relation(fields: [auditId], references: [id], onDelete: Cascade)
+  control  Control @relation(fields: [controlId], references: [id])
+  assignee User?   @relation("FindingAssignee", fields: [assignedTo], references: [id])
+
+  @@index([organizationId])
+  @@index([assignedTo])
+  @@index([auditId])
 }
 
 /////////////////////////
