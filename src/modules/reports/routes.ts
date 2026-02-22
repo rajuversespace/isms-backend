@@ -202,7 +202,7 @@ export async function reportRoutes(fastify: FastifyInstance) {
   );
 
   // ── GET /api/reports/audit-summary?startDate=&endDate= ──────────────────────
-  // Returns: audit KPIs + audit list with findings counts
+  // Returns: audit KPIs + audit list with findings counts + snapshot for completed
   fastify.get(
     '/audit-summary',
     { onRequest: [authenticate] },
@@ -218,7 +218,10 @@ export async function reportRoutes(fastify: FastifyInstance) {
           organizationId: user.organizationId,
           startDate: { gte: start },
         },
-        include: { findings: true },
+        include: {
+          findings: true,
+          snapshot: true,
+        },
         orderBy: { startDate: 'desc' },
       });
 
@@ -229,32 +232,77 @@ export async function reportRoutes(fastify: FastifyInstance) {
       const openFindings   = allFindings.filter((f: any) => f.status === 'OPEN').length;
       const closedFindings = allFindings.filter((f: any) => f.status === 'CLOSED').length;
 
+      // Average compliance % across completed audits with snapshots
+      const snapshotted = completed.filter((a: any) => a.snapshot);
+      const avgCompliancePct = snapshotted.length > 0
+        ? Math.round(snapshotted.reduce((sum: number, a: any) => sum + (a.snapshot?.compliancePct ?? 0), 0) / snapshotted.length)
+        : null;
+
       const auditRows = audits.map((a: any) => ({
-        id:         a.id,
-        type:       a.type,
-        auditor:    a.externalAuditorEmail ?? a.assignedAuditorId ?? '—',
-        scope:      a.frameworkName ?? a.name,
-        startDate:  a.startDate,
-        endDate:    a.endDate,
-        status:     a.status === 'COMPLETED' ? 'Completed' : 'In Progress',
-        major:      a.findings.filter((f: any) => f.severity === 'MAJOR').length,
-        minor:      a.findings.filter((f: any) => f.severity === 'MINOR').length,
-        observation: a.findings.filter((f: any) => f.severity === 'OBSERVATION').length,
+        id:          a.id,
+        name:        a.name,
+        type:        a.type,
+        auditor:     a.externalAuditorEmail ?? a.assignedAuditorId ?? '—',
+        scope:       a.frameworkName ?? a.name,
+        startDate:   a.startDate,
+        endDate:     a.endDate,
+        closedAt:    a.closedAt,
+        status:      a.status,
+        isLocked:    a.isLocked,
+        major:       a.snapshot?.majorFindings       ?? a.findings.filter((f: any) => f.severity === 'MAJOR').length,
+        minor:       a.snapshot?.minorFindings       ?? a.findings.filter((f: any) => f.severity === 'MINOR').length,
+        observation: a.snapshot?.observationFindings ?? a.findings.filter((f: any) => f.severity === 'OBSERVATION').length,
+        ofi:         a.snapshot?.ofiFindings         ?? a.findings.filter((f: any) => f.severity === 'OFI').length,
+        compliancePct: a.snapshot?.compliancePct     ?? null,
+        // Final report fields
+        executiveSummary: a.executiveSummary,
+        auditConclusion:  a.auditConclusion,
+        signedPdfUrl:     a.signedPdfUrl,
+        signedAt:         a.signedAt,
+        snapshot:         a.snapshot,
       }));
 
       return reply.send({
         success: true,
         data: {
           summary: {
-            totalAudits:    audits.length,
-            completed:      completed.length,
-            inProgress:     inProgress.length,
+            totalAudits:      audits.length,
+            completed:        completed.length,
+            inProgress:       inProgress.length,
             openFindings,
             closedFindings,
+            avgCompliancePct,
           },
           audits: auditRows,
         },
       });
+    }
+  );
+
+  // ── GET /api/reports/completed-audits ───────────────────────────────────────
+  // Returns all completed+locked audits with their snapshots for reporting feeds
+  fastify.get(
+    '/completed-audits',
+    { onRequest: [authenticate] },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const user = (req as any).user;
+      const { startDate, endDate } = req.query as Record<string, string>;
+
+      const where: any = {
+        organizationId: user.organizationId,
+        status: 'COMPLETED',
+        isLocked: true,
+      };
+      if (startDate) where.closedAt = { ...(where.closedAt ?? {}), gte: new Date(startDate) };
+      if (endDate)   where.closedAt = { ...(where.closedAt ?? {}), lte: new Date(endDate) };
+
+      const audits = await prisma.audit.findMany({
+        where,
+        include: { snapshot: true },
+        orderBy: { closedAt: 'desc' },
+      });
+
+      return reply.send({ success: true, data: audits });
     }
   );
 

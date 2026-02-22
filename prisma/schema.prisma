@@ -380,10 +380,56 @@ model Audit {
   createdAt            DateTime    @default(now())
   closedAt             DateTime?
 
+  // Final report fields
+  executiveSummary     String?     // Editable by auditor before sign-off
+  auditConclusion      String?     // PASS / PASS_WITH_CONDITIONS / FAIL — free text
+  signedPdfUrl         String?     // URL of uploaded signed PDF
+  signedAt             DateTime?   // Set when "Sign & Complete" is clicked
+  signedById           String?     // userId who signed
+  isLocked             Boolean     @default(false) // true once COMPLETED
+
   organization   Organization   @relation(fields: [organizationId], references: [id])
   findings       AuditFinding[]
   testMappings   TestAudit[]
   auditControls  AuditControl[]
+  snapshot       AuditSnapshot?
+}
+
+/// Immutable metrics snapshot captured at audit completion time.
+/// This is the source of truth for historical reporting.
+model AuditSnapshot {
+  id             String   @id @default(uuid())
+  auditId        String   @unique  // one snapshot per audit
+  organizationId String
+  capturedAt     DateTime @default(now())
+
+  // Control metrics
+  totalControls        Int
+  compliantControls    Int
+  nonCompliantControls Int
+  notApplicableControls Int
+  pendingControls      Int
+  compliancePct        Float    // compliant / (total - notApplicable) * 100
+
+  // Finding metrics
+  totalFindings       Int
+  openFindings        Int
+  closedFindings      Int
+  majorFindings       Int
+  minorFindings       Int
+  observationFindings Int
+  ofiFindings         Int
+
+  // Risk summary (counts at close time)
+  criticalRisks Int @default(0)
+  highRisks     Int @default(0)
+  mediumRisks   Int @default(0)
+  lowRisks      Int @default(0)
+
+  audit Audit @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([capturedAt])
 }
 
 model AuditControl {

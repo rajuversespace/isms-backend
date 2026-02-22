@@ -7,27 +7,33 @@
  *     - Start / close audits
  *     - Update any AuditControl review
  *     - Create / edit / delete findings
+ *     - Edit final report draft + sign & complete
  *   AUDITOR:
- *     - GET /                  (only audits where assignedAuditorId = user.id)
- *     - GET /:id               (only their assigned audit)
- *     - GET /:id/controls      (their assigned audit controls)
+ *     - GET /                     (only audits where assignedAuditorId = user.id)
+ *     - GET /:id                  (only their assigned audit)
+ *     - GET /:id/controls         (their assigned audit controls)
  *     - PATCH /:id/controls/:cid  (update review status / notes on their audit)
- *     - POST /:id/findings     (create a finding on their audit)
- *     - PATCH /:id/findings/:fid (update their findings)
+ *     - POST /:id/findings        (create a finding on their audit)
+ *     - PATCH /:id/findings/:fid  (update their findings)
  *     - DELETE /:id/findings/:fid (delete their findings)
+ *     - GET/PATCH /:id/report     (edit executive summary on their assigned audit)
+ *     - POST /:id/sign-and-complete (sign & lock the audit)
  *
  * Endpoints:
- *   POST   /                       create audit + generate audit_controls  [admin]
- *   GET    /                       list audits (AUDITOR sees only theirs)
- *   GET    /:id                    single audit with controls + findings
- *   PATCH  /:id                    update audit fields                     [admin]
- *   POST   /:id/start              PLANNED → IN_PROGRESS                   [admin]
- *   POST   /:id/close              → COMPLETED                             [admin]
- *   GET    /:id/controls           list AuditControls
- *   PATCH  /:id/controls/:cid      update review status / notes            [admin|auditor]
- *   POST   /:id/findings           create finding                         [admin|auditor]
- *   PATCH  /:id/findings/:fid      update finding                         [admin|auditor]
- *   DELETE /:id/findings/:fid      delete finding                         [admin|auditor]
+ *   POST   /                          create audit + generate audit_controls  [admin]
+ *   GET    /                          list audits (AUDITOR sees only theirs)
+ *   GET    /:id                       single audit with controls + findings
+ *   PATCH  /:id                       update audit fields                     [admin]
+ *   POST   /:id/start                 PLANNED → IN_PROGRESS                   [admin]
+ *   POST   /:id/close                 → COMPLETED + snapshot + lock            [admin]
+ *   GET    /:id/controls              list AuditControls
+ *   PATCH  /:id/controls/:cid         update review status / notes            [admin|auditor]
+ *   POST   /:id/findings              create finding                          [admin|auditor]
+ *   PATCH  /:id/findings/:fid         update finding                          [admin|auditor]
+ *   DELETE /:id/findings/:fid         delete finding                          [admin|auditor]
+ *   GET    /:id/report                get final report draft + snapshot data  [admin|auditor]
+ *   PATCH  /:id/report                update executiveSummary / auditConclusion / signedPdfUrl  [admin|auditor]
+ *   POST   /:id/sign-and-complete     sign + lock + snapshot + → COMPLETED    [admin|auditor]
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
@@ -119,6 +125,83 @@ const updateFindingSchema = z.object({
   remediation: z.string().optional(),
   status:      z.enum(['OPEN', 'IN_REMEDIATION', 'READY_FOR_REVIEW', 'CLOSED']).optional(),
 });
+
+// ── Helper: capture metrics snapshot + lock + mark COMPLETED ─────────────────
+
+async function captureSnapshotAndLock(
+  auditId: string,
+  organizationId: string,
+  signedById: string,
+): Promise<void> {
+  // Load controls + findings for snapshot
+  const [controls, findings, risks] = await Promise.all([
+    prisma.auditControl.findMany({ where: { auditId } }),
+    prisma.auditFinding.findMany({ where: { auditId } }),
+    prisma.risk.findMany({ where: { asset: { organizationId } } }),
+  ]);
+
+  const eligible   = controls.filter((c: any) => c.reviewStatus !== 'NOT_APPLICABLE');
+  const compliant  = controls.filter((c: any) => c.reviewStatus === 'COMPLIANT').length;
+  const compliancePct = eligible.length > 0 ? Math.round((compliant / eligible.length) * 100) : 0;
+
+  // Upsert snapshot (idempotent — re-running close is safe)
+  await prisma.auditSnapshot.upsert({
+    where:  { auditId },
+    create: {
+      auditId,
+      organizationId,
+      totalControls:         controls.length,
+      compliantControls:     controls.filter((c: any) => c.reviewStatus === 'COMPLIANT').length,
+      nonCompliantControls:  controls.filter((c: any) => c.reviewStatus === 'NON_COMPLIANT').length,
+      notApplicableControls: controls.filter((c: any) => c.reviewStatus === 'NOT_APPLICABLE').length,
+      pendingControls:       controls.filter((c: any) => c.reviewStatus === 'PENDING').length,
+      compliancePct,
+      totalFindings:         findings.length,
+      openFindings:          findings.filter((f: any) => f.status === 'OPEN').length,
+      closedFindings:        findings.filter((f: any) => f.status === 'CLOSED').length,
+      majorFindings:         findings.filter((f: any) => f.severity === 'MAJOR').length,
+      minorFindings:         findings.filter((f: any) => f.severity === 'MINOR').length,
+      observationFindings:   findings.filter((f: any) => f.severity === 'OBSERVATION').length,
+      ofiFindings:           findings.filter((f: any) => f.severity === 'OFI').length,
+      criticalRisks:         risks.filter((r: any) => r.level === 'CRITICAL').length,
+      highRisks:             risks.filter((r: any) => r.level === 'HIGH').length,
+      mediumRisks:           risks.filter((r: any) => r.level === 'MEDIUM').length,
+      lowRisks:              risks.filter((r: any) => r.level === 'LOW').length,
+    },
+    update: {
+      capturedAt:            new Date(),
+      totalControls:         controls.length,
+      compliantControls:     controls.filter((c: any) => c.reviewStatus === 'COMPLIANT').length,
+      nonCompliantControls:  controls.filter((c: any) => c.reviewStatus === 'NON_COMPLIANT').length,
+      notApplicableControls: controls.filter((c: any) => c.reviewStatus === 'NOT_APPLICABLE').length,
+      pendingControls:       controls.filter((c: any) => c.reviewStatus === 'PENDING').length,
+      compliancePct,
+      totalFindings:         findings.length,
+      openFindings:          findings.filter((f: any) => f.status === 'OPEN').length,
+      closedFindings:        findings.filter((f: any) => f.status === 'CLOSED').length,
+      majorFindings:         findings.filter((f: any) => f.severity === 'MAJOR').length,
+      minorFindings:         findings.filter((f: any) => f.severity === 'MINOR').length,
+      observationFindings:   findings.filter((f: any) => f.severity === 'OBSERVATION').length,
+      ofiFindings:           findings.filter((f: any) => f.severity === 'OFI').length,
+      criticalRisks:         risks.filter((r: any) => r.level === 'CRITICAL').length,
+      highRisks:             risks.filter((r: any) => r.level === 'HIGH').length,
+      mediumRisks:           risks.filter((r: any) => r.level === 'MEDIUM').length,
+      lowRisks:              risks.filter((r: any) => r.level === 'LOW').length,
+    },
+  });
+
+  // Update audit: COMPLETED + isLocked + signedAt
+  await prisma.audit.update({
+    where: { id: auditId },
+    data: {
+      status:    'COMPLETED' as any,
+      closedAt:  new Date(),
+      isLocked:  true,
+      signedAt:  new Date(),
+      signedById,
+    },
+  });
+}
 
 // ── Helper: verify audit belongs to org (and optionally to auditor) ───────────
 
@@ -288,21 +371,124 @@ export async function auditRoutes(app: FastifyInstance) {
   });
 
   // ── POST /:id/close ───────────────────────────────────────────────────────
+  // Admin shortcut to mark COMPLETED without going through sign-and-complete.
+  // Also captures snapshot + locks.
   app.post('/:id/close', { onRequest: [authenticate] }, async (request: FastifyRequest, reply: FastifyReply) => {
     const user = (request as any).user;
     if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin only' });
 
     const { id } = request.params as { id: string };
-    const existing = await prisma.audit.findFirst({ where: { id, organizationId: user.organizationId } });
+    const existing = await prisma.audit.findFirst({
+      where:   { id, organizationId: user.organizationId },
+      include: { auditControls: true, findings: true },
+    });
     if (!existing) return reply.status(404).send({ error: 'Audit not found' });
-    if (existing.status === 'COMPLETED')
+    if ((existing as any).status === 'COMPLETED')
       return reply.status(400).send({ error: 'Audit is already completed' });
 
-    const audit = await prisma.audit.update({
-      where: { id },
-      data:  { status: 'COMPLETED', closedAt: new Date() },
-      include: AUDIT_INCLUDE,
+    await captureSnapshotAndLock(id, user.organizationId, user.id);
+
+    const audit = await prisma.audit.findFirst({ where: { id }, include: AUDIT_INCLUDE });
+    return reply.send({ success: true, data: audit });
+  });
+
+  // ── GET /:id/report — get final report draft + snapshot ───────────────────
+  app.get('/:id/report', { onRequest: [authenticate] }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const user   = (request as any).user;
+    const { id } = request.params as { id: string };
+
+    if (!canAudit(user)) return reply.status(403).send({ error: 'Forbidden' });
+
+    const where: any = { id, organizationId: user.organizationId };
+    if (isAuditor(user)) where.assignedAuditorId = user.id;
+
+    const audit = await prisma.audit.findFirst({
+      where,
+      include: {
+        ...AUDIT_INCLUDE,
+        snapshot: true,
+        auditControls: {
+          include: {
+            control: { select: { id: true, isoReference: true, title: true, status: true } },
+          },
+          orderBy: { control: { isoReference: 'asc' as const } },
+        },
+      },
     });
+    if (!audit) return reply.status(404).send({ error: 'Audit not found' });
+
+    // Auto-generate a live metrics block (used before snapshot exists)
+    const controls = (audit as any).auditControls as any[];
+    const findings = (audit as any).findings as any[];
+
+    const metrics = {
+      totalControls:        controls.length,
+      compliantControls:    controls.filter((c: any) => c.reviewStatus === 'COMPLIANT').length,
+      nonCompliantControls: controls.filter((c: any) => c.reviewStatus === 'NON_COMPLIANT').length,
+      notApplicableControls: controls.filter((c: any) => c.reviewStatus === 'NOT_APPLICABLE').length,
+      pendingControls:      controls.filter((c: any) => c.reviewStatus === 'PENDING').length,
+      compliancePct:        (() => {
+        const eligible = controls.filter((c: any) => c.reviewStatus !== 'NOT_APPLICABLE');
+        const compliant = controls.filter((c: any) => c.reviewStatus === 'COMPLIANT').length;
+        return eligible.length > 0 ? Math.round((compliant / eligible.length) * 100) : 0;
+      })(),
+      totalFindings:       findings.length,
+      openFindings:        findings.filter((f: any) => f.status === 'OPEN').length,
+      closedFindings:      findings.filter((f: any) => f.status === 'CLOSED').length,
+      majorFindings:       findings.filter((f: any) => f.severity === 'MAJOR').length,
+      minorFindings:       findings.filter((f: any) => f.severity === 'MINOR').length,
+      observationFindings: findings.filter((f: any) => f.severity === 'OBSERVATION').length,
+      ofiFindings:         findings.filter((f: any) => f.severity === 'OFI').length,
+    };
+
+    return reply.send({ success: true, data: { audit, metrics } });
+  });
+
+  // ── PATCH /:id/report — update executive summary / conclusion / PDF ────────
+  app.patch('/:id/report', { onRequest: [authenticate] }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const user   = (request as any).user;
+    const { id } = request.params as { id: string };
+
+    if (!canAudit(user)) return reply.status(403).send({ error: 'Forbidden' });
+
+    const where: any = { id, organizationId: user.organizationId };
+    if (isAuditor(user)) where.assignedAuditorId = user.id;
+
+    const existing = await prisma.audit.findFirst({ where });
+    if (!existing) return reply.status(404).send({ error: 'Audit not found' });
+    if ((existing as any).isLocked)
+      return reply.status(400).send({ error: 'Audit is locked after completion' });
+
+    const body = request.body as any;
+    const updateData: any = {};
+    if (body.executiveSummary  !== undefined) updateData.executiveSummary  = body.executiveSummary;
+    if (body.auditConclusion   !== undefined) updateData.auditConclusion   = body.auditConclusion;
+    if (body.signedPdfUrl      !== undefined) updateData.signedPdfUrl      = body.signedPdfUrl;
+
+    const updated = await prisma.audit.update({ where: { id }, data: updateData });
+    return reply.send({ success: true, data: updated });
+  });
+
+  // ── POST /:id/sign-and-complete — sign, snapshot, lock, → COMPLETED ────────
+  app.post('/:id/sign-and-complete', { onRequest: [authenticate] }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const user   = (request as any).user;
+    const { id } = request.params as { id: string };
+
+    if (!canAudit(user)) return reply.status(403).send({ error: 'Forbidden' });
+
+    const where: any = { id, organizationId: user.organizationId };
+    if (isAuditor(user)) where.assignedAuditorId = user.id;
+
+    const existing = await prisma.audit.findFirst({ where });
+    if (!existing) return reply.status(404).send({ error: 'Audit not found' });
+    if ((existing as any).isLocked)
+      return reply.status(400).send({ error: 'Audit is already signed and locked' });
+    if ((existing as any).status === 'COMPLETED')
+      return reply.status(400).send({ error: 'Audit is already completed' });
+
+    await captureSnapshotAndLock(id, user.organizationId, user.id);
+
+    const audit = await prisma.audit.findFirst({ where: { id }, include: AUDIT_INCLUDE });
     return reply.send({ success: true, data: audit });
   });
 
@@ -335,6 +521,8 @@ export async function auditRoutes(app: FastifyInstance) {
     const audit = await getAuditOrFail(id, user, reply);
     if (!audit) return;
 
+    if (audit.isLocked) return reply.status(400).send({ error: 'Audit is locked and cannot be modified' });
+
     const updated = await prisma.auditControl.update({
       where: { id: cid },
       data: {
@@ -362,6 +550,7 @@ export async function auditRoutes(app: FastifyInstance) {
 
     const audit = await getAuditOrFail(id, user, reply);
     if (!audit) return;
+    if (audit.isLocked) return reply.status(400).send({ error: 'Audit is locked and cannot be modified' });
 
     // Verify the control is in scope for this audit
     const inScope = await prisma.auditControl.findFirst({
@@ -398,6 +587,7 @@ export async function auditRoutes(app: FastifyInstance) {
 
     const audit = await getAuditOrFail(id, user, reply);
     if (!audit) return;
+    if (audit.isLocked) return reply.status(400).send({ error: 'Audit is locked and cannot be modified' });
 
     const finding = await prisma.auditFinding.findFirst({ where: { id: fid, auditId: id } });
     if (!finding) return reply.status(404).send({ error: 'Finding not found' });
@@ -426,6 +616,7 @@ export async function auditRoutes(app: FastifyInstance) {
 
     const audit = await getAuditOrFail(id, user, reply);
     if (!audit) return;
+    if (audit.isLocked) return reply.status(400).send({ error: 'Audit is locked and cannot be modified' });
 
     const finding = await prisma.auditFinding.findFirst({ where: { id: fid, auditId: id } });
     if (!finding) return reply.status(404).send({ error: 'Finding not found' });
