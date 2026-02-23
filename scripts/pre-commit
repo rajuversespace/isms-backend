@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Pre-commit hook: Secret scanning with Gitleaks
+#
+# Scans staged files for secrets BEFORE they can be committed.
+# Install: scripts/setup-hooks.sh (or manually copy to .git/hooks/pre-commit)
+# =============================================================================
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+echo -e "${YELLOW}[pre-commit]${NC} Running secret scan on staged files..."
+
+# ---------- Check if gitleaks is installed ----------
+if command -v gitleaks &> /dev/null; then
+    # Run gitleaks on staged changes only (--staged flag)
+    if ! gitleaks protect --staged --config=".gitleaks.toml" --verbose 2>&1; then
+        echo ""
+        echo -e "${RED}============================================${NC}"
+        echo -e "${RED} SECRET DETECTED — COMMIT BLOCKED${NC}"
+        echo -e "${RED}============================================${NC}"
+        echo ""
+        echo -e "Gitleaks found potential secrets in staged files."
+        echo -e "Please remove the secret and try again."
+        echo ""
+        echo -e "If this is a false positive, you can:"
+        echo -e "  1. Add the pattern to .gitleaks.toml allowlist"
+        echo -e "  2. Skip this check (NOT recommended): git commit --no-verify"
+        echo ""
+        exit 1
+    fi
+    echo -e "${GREEN}[pre-commit]${NC} Gitleaks: No secrets found."
+else
+    echo -e "${YELLOW}[pre-commit]${NC} Gitleaks not installed — falling back to pattern scan."
+
+    # ---------- Fallback: basic regex scan on staged files ----------
+    STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+
+    if [ -z "$STAGED_FILES" ]; then
+        exit 0
+    fi
+
+    SECRETS_FOUND=0
+
+    # Patterns that should never be committed
+    PATTERNS=(
+        # AWS
+        'AKIA[0-9A-Z]{16}'
+        # Generic secret assignment
+        'secret[_-]?key\s*[:=]\s*["\x27][A-Za-z0-9/+=]{20,}'
+        # Private keys
+        '-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'
+        # Vanta secrets
+        'vnt_[a-zA-Z0-9]{20,}'
+        # MongoDB with embedded credentials
+        'mongodb(\+srv)?://[a-zA-Z0-9_]+:[a-zA-Z0-9_!@#$%^&*]+@'
+        # JWT tokens (3-part base64 dot-separated, long)
+        'eyJ[a-zA-Z0-9_-]{20,}\.eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}'
+        # Generic high-entropy strings after common secret keywords
+        '(?i)(password|passwd|secret|token|api[_-]?key)\s*[:=]\s*["\x27][^\s"'\'']{16,}["\x27]'
+    )
+
+    for file in $STAGED_FILES; do
+        # Skip binary files and known safe files
+        case "$file" in
+            *.lock|*.png|*.jpg|*.gif|*.ico|*.woff*|*.ttf|*.eot|*.env.example|CLAUDE.md)
+                continue
+                ;;
+        esac
+
+        if [ ! -f "$file" ]; then
+            continue
+        fi
+
+        for pattern in "${PATTERNS[@]}"; do
+            if git diff --cached -- "$file" | grep -qP "$pattern" 2>/dev/null; then
+                echo -e "${RED}[ALERT]${NC} Potential secret in: $file"
+                echo -e "  Pattern: $pattern"
+                SECRETS_FOUND=1
+            fi
+        done
+    done
+
+    if [ "$SECRETS_FOUND" -ne 0 ]; then
+        echo ""
+        echo -e "${RED}============================================${NC}"
+        echo -e "${RED} POTENTIAL SECRETS DETECTED — COMMIT BLOCKED${NC}"
+        echo -e "${RED}============================================${NC}"
+        echo ""
+        echo -e "Install gitleaks for more accurate scanning:"
+        echo -e "  brew install gitleaks"
+        echo -e "  # or: scripts/setup-hooks.sh"
+        echo ""
+        echo -e "To skip (NOT recommended): git commit --no-verify"
+        echo ""
+        exit 1
+    fi
+
+    echo -e "${GREEN}[pre-commit]${NC} Pattern scan: No secrets found."
+fi
+
+# ---------- Check for .env files (except .env.example) ----------
+STAGED_ENV_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.env$|\.env\.' | grep -v '\.env\.example$' || true)
+if [ -n "$STAGED_ENV_FILES" ]; then
+    echo ""
+    echo -e "${RED}============================================${NC}"
+    echo -e "${RED} .env FILE DETECTED — COMMIT BLOCKED${NC}"
+    echo -e "${RED}============================================${NC}"
+    echo ""
+    echo -e "The following .env files are staged:"
+    echo "$STAGED_ENV_FILES"
+    echo ""
+    echo -e "Remove them with: git reset HEAD <file>"
+    echo ""
+    exit 1
+fi
+
+echo -e "${GREEN}[pre-commit]${NC} All checks passed."

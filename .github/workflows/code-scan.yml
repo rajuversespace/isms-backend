@@ -1,0 +1,135 @@
+name: Code Scan
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  # Run weekly on Monday at 06:00 UTC
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  # ---------- CodeQL for TypeScript (legacy backend) ----------
+  codeql-typescript:
+    name: CodeQL — TypeScript
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          # Only scan the legacy TS backend and any JS/TS files
+          config: |
+            paths:
+              - src/
+              - prisma/
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript-typescript"
+
+  # ---------- Clippy lint for Rust backend ----------
+  rust-clippy:
+    name: Clippy — Rust
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust-api
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust-api/target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-api/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-clippy-
+
+      - name: Run Clippy (SARIF output)
+        run: |
+          cargo clippy --all-targets --all-features --message-format=json \
+            | clippy-sarif | tee results.sarif
+        continue-on-error: true
+
+      - name: Install SARIF tools
+        run: cargo install clippy-sarif sarif-fmt
+        continue-on-error: true
+
+      - name: Run Clippy (human-readable)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # ---------- Rust security audit ----------
+  rust-audit:
+    name: Cargo Audit — Rust Dependencies
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust-api
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit
+
+  # ---------- Rust tests ----------
+  rust-test:
+    name: Rust Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust-api
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust-api/target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('rust-api/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Build
+        run: cargo build --all-targets
+
+      - name: Run tests
+        run: cargo test --all-targets
