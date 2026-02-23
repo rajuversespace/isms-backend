@@ -125,3 +125,56 @@ dist/
 
 # Prisma — migration files must be committed for production deploys
 # prisma/migrations/
+
+# ============================================
+# Rust Backend (rust-api/)
+# ============================================
+
+# Rust build artifacts
+rust-api/target/
+**/*.rs.bk
+
+# ============================================
+# Credentials & Secrets (NEVER COMMIT)
+# ============================================
+
+# Vanta credentials
+vanta-credentials.env
+*.credentials.env
+
+# Secret/key files
+*.secret
+*.key
+*.pem
+*.p12
+
+# Any .env variant (belt + suspenders)
+.env.*
+!.env.example
+
+# ============================================
+# MCP Configuration (contains credentials)
+# ============================================
+.mcp.json
+*.mcp.json
+
+# ============================================
+# Claude Code / AI Agent files (NEVER COMMIT)
+# These contain internal architecture details,
+# credentials references, and agent instructions.
+# ============================================
+.claude/
+rust-api/.claude/
+rust-api/AGENT.md
+rust-api/NOPE.md
+.claude/settings.local.json
+
+# ============================================
+# OS / IDE
+# ============================================
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
