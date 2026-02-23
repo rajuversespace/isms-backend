@@ -91,7 +91,7 @@ const TEST_INCLUDE = {
   owner:       { select: { id: true, name: true, email: true } },
   controls:    { include: { control: { select: { id: true, isoReference: true, title: true, status: true } } } },
   frameworks:  true,
-  audits:      { include: { audit: { select: { id: true, type: true, auditor: true, scope: true } } } },
+  audits:      { include: { audit: { select: { id: true, name: true, type: true, status: true, frameworkName: true, assignedAuditorId: true, externalAuditorEmail: true } } } },
   evidences:   { include: { evidence: { select: { id: true, type: true, fileName: true, fileUrl: true, createdAt: true } } } },
   integration: { select: { id: true, provider: true, status: true } },
 } as const;
