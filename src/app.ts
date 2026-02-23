@@ -30,6 +30,7 @@ import { onboardingRoutes } from './modules/onboarding/routes';
 import { testRoutes } from './modules/tests/routes';
 import { reportRoutes } from './modules/reports/routes';
 import { findingRoutes } from './modules/findings/routes';
+import { trustRoutes } from './modules/trust/routes';
 
 export const app: FastifyInstance = Fastify({
   logger: {
@@ -102,6 +103,7 @@ app.register(onboardingRoutes,  { prefix: '/api/onboarding' });
 app.register(testRoutes,        { prefix: '/api/tests' });
 app.register(reportRoutes,      { prefix: '/api/reports' });
 app.register(findingRoutes,     { prefix: '/api/findings' });
+app.register(trustRoutes,       { prefix: '/api/trust' });
 
 // Health check
 app.get('/health', async () => {

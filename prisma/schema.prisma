@@ -110,12 +110,18 @@ model Organization {
   name        String
   createdAt  DateTime @default(now())
 
-  users        User[]
-  assets       Asset[]
-  controls     Control[]
-  policies     Policy[]
-  audits       Audit[]
-  integrations Integration[]
+  users                      User[]
+  assets                     Asset[]
+  controls                   Control[]
+  policies                   Policy[]
+  audits                     Audit[]
+  integrations               Integration[]
+  trustCenterSettings        TrustCenterSettings?
+  trustDocuments             TrustDocument[]
+  trustAccessRequests        TrustAccessRequest[]
+  trustAnnouncements         TrustAnnouncement[]
+  trustMetricsSnapshots      TrustMetricsSnapshot[]
+  trustQuestionnaireRequests TrustQuestionnaireRequest[]
 }
 
 model User {
@@ -683,4 +689,133 @@ model ActivityLog {
   timestamp DateTime @default(now())
 
   user      User @relation(fields: [userId], references: [id])
+}
+
+/////////////////////////
+// TRUST CENTER
+/////////////////////////
+
+enum TrustDocumentCategory {
+  POLICY
+  REPORT
+  CERTIFICATE
+  WHITEPAPER
+  OTHER
+}
+
+enum TrustAccessStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum TrustAnnouncementType {
+  SECURITY_UPDATE
+  INCIDENT
+  CERTIFICATION
+  GENERAL
+}
+
+model TrustCenterSettings {
+  id             String   @id @default(uuid())
+  organizationId String   @unique
+  enabled        Boolean  @default(false)
+  orgSlug        String   @unique // used in public URL: /trust/:orgSlug
+  logoUrl        String?
+  primaryColor   String   @default("#2563eb")
+  description    String?
+  securityEmail  String?
+  updatedAt      DateTime @updatedAt
+  createdAt      DateTime @default(now())
+
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([orgSlug])
+}
+
+model TrustDocument {
+  id             String                 @id @default(uuid())
+  organizationId String
+  name           String
+  category       TrustDocumentCategory  @default(OTHER)
+  fileUrl        String
+  requiresNda    Boolean                @default(false)
+  publicVisible  Boolean                @default(false)
+  version        String?
+  uploadedBy     String                 // userId
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  organization   Organization           @relation(fields: [organizationId], references: [id])
+  accessRequests TrustAccessRequest[]
+
+  @@index([organizationId])
+}
+
+model TrustAccessRequest {
+  id              String            @id @default(uuid())
+  organizationId  String
+  requesterName   String
+  requesterEmail  String
+  company         String?
+  purpose         String?
+  documentId      String?
+  status          TrustAccessStatus @default(PENDING)
+  ndaSigned       Boolean           @default(false)
+  approvalToken   String?           @unique
+  approvedBy      String?           // userId
+  createdAt       DateTime          @default(now())
+  approvedAt      DateTime?
+  expiresAt       DateTime?         // for time-limited signed links
+
+  organization    Organization  @relation(fields: [organizationId], references: [id])
+  document        TrustDocument? @relation(fields: [documentId], references: [id])
+
+  @@index([organizationId])
+  @@index([requesterEmail])
+}
+
+model TrustAnnouncement {
+  id             String                @id @default(uuid())
+  organizationId String
+  title          String
+  content        String
+  type           TrustAnnouncementType @default(GENERAL)
+  published      Boolean               @default(false)
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+}
+
+model TrustMetricsSnapshot {
+  id                  String   @id @default(uuid())
+  organizationId      String
+  frameworkName       String
+  compliancePercentage Float
+  controlCount        Int
+  completedControls   Int
+  snapshotDate        DateTime @default(now())
+
+  organization        Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, snapshotDate])
+}
+
+model TrustQuestionnaireRequest {
+  id                 String   @id @default(uuid())
+  organizationId     String
+  requesterEmail     String
+  questionnaireType  String   @default("STANDARD")
+  status             String   @default("PENDING") // PENDING | IN_PROGRESS | COMPLETED
+  responseFileUrl    String?
+  notes              String?
+  createdAt          DateTime @default(now())
+  respondedAt        DateTime?
+
+  organization       Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
 }
