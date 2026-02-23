@@ -9,54 +9,114 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  # Required for Copilot code review
+  copilot: write
 
 jobs:
-  ai-review:
-    name: ChatGPT Rust Review
+  # ──────────────────────────────────────────────────────────
+  # Primary: GitHub Copilot Code Review (free, no API key)
+  # ──────────────────────────────────────────────────────────
+  copilot-review:
+    name: Copilot Rust Review
     runs-on: ubuntu-latest
-    # Skip bot PRs (Dependabot, etc.)
     if: github.actor != 'dependabot[bot]'
-
     steps:
       - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: GitHub Copilot Code Review
+        uses: copilot/code-review-action@v1
+        with:
+          # Only review Rust files in the backend
+          path-filters: |
+            - "rust-api/**/*.rs"
+            - "rust-api/Cargo.toml"
+          model: copilot
+          # Custom instructions for Rust/ISMS context
+          copilot-review-instructions: |
+            This is an ISMS (Information Security Management System) backend built with
+            Rust, Actix-web 4, and MongoDB. Review with focus on:
+
+            SECURITY (highest priority for an ISMS product):
+            - Authentication/authorization bypass in JWT Claims extractor or RBAC guards
+            - NoSQL injection via unsanitized input in MongoDB doc! queries
+            - Secret/credential exposure (hardcoded keys, tokens in logs)
+            - Missing input validation on request DTOs
+            - CORS misconfiguration
+
+            RUST BEST PRACTICES:
+            - No unwrap()/expect() in production handler/service code (only in tests/main startup)
+            - Proper error propagation with ? operator and AppError enum
+            - Idiomatic ownership/borrowing (avoid unnecessary clones)
+            - Correct serde attributes (#[serde(rename, skip_serializing_if, default)])
+            - Async safety: no blocking calls in async handlers (bcrypt is fine)
+
+            LOGIC:
+            - MongoDB query correctness (deleted_at: null filters, org_id scoping)
+            - JWT/RBAC permission checks on every protected endpoint
+            - Edge cases: empty collections, missing optional fields, duplicate email handling
+
+            PERFORMANCE:
+            - Unnecessary String allocations where &str would work
+            - N+1 database query patterns
+            - Missing indexes for query patterns used in services
+
+  # ──────────────────────────────────────────────────────────
+  # Fallback: OpenAI ChatGPT review (when API key is available)
+  # ──────────────────────────────────────────────────────────
+  chatgpt-review:
+    name: ChatGPT Rust Review (Fallback)
+    runs-on: ubuntu-latest
+    if: github.actor != 'dependabot[bot]'
+    # Only run if the OPENAI_API_KEY secret exists
+    env:
+      HAS_OPENAI_KEY: ${{ secrets.OPENAI_API_KEY != '' }}
+
+    steps:
+      - name: Check for API key
+        id: check_key
+        run: |
+          if [ "$HAS_OPENAI_KEY" != "true" ]; then
+            echo "OPENAI_API_KEY not configured — skipping ChatGPT review."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout code
+        if: steps.check_key.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Get PR diff (Rust files only)
+        if: steps.check_key.outputs.skip != 'true'
         id: diff
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get the diff for rust-api/ files only
           DIFF=$(gh pr diff ${{ github.event.pull_request.number }} \
             --repo ${{ github.repository }} \
             | awk '/^diff --git.*rust-api\//,/^diff --git/' \
             | head -c 100000)
 
           if [ -z "$DIFF" ]; then
-            echo "No Rust file changes found in this PR."
+            echo "No Rust file changes found."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Save diff to file (avoid shell escaping issues)
           echo "$DIFF" > /tmp/pr_diff.txt
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
-          # Also grab the list of changed Rust files
           CHANGED_FILES=$(gh pr diff ${{ github.event.pull_request.number }} \
             --repo ${{ github.repository }} --name-only \
             | grep '^rust-api/' | grep '\.rs$' || true)
           echo "$CHANGED_FILES" > /tmp/changed_files.txt
 
-          echo "Changed Rust files:"
-          cat /tmp/changed_files.txt
-
-      - name: Read changed file contents for context
-        if: steps.diff.outputs.skip != 'true'
+      - name: Collect file contents
+        if: steps.check_key.outputs.skip != 'true' && steps.diff.outputs.skip != 'true'
         run: |
-          # Collect full contents of changed Rust files (up to 200KB total)
           TOTAL=0
           MAX_BYTES=200000
           > /tmp/file_contents.txt
@@ -64,25 +124,19 @@ jobs:
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             [ ! -f "$file" ] && continue
-
             FILE_SIZE=$(wc -c < "$file")
             NEW_TOTAL=$((TOTAL + FILE_SIZE))
-
             if [ "$NEW_TOTAL" -gt "$MAX_BYTES" ]; then
-              echo "--- Skipping $file (would exceed size limit) ---" >> /tmp/file_contents.txt
               continue
             fi
-
             echo "========== FILE: $file ==========" >> /tmp/file_contents.txt
             cat "$file" >> /tmp/file_contents.txt
             echo "" >> /tmp/file_contents.txt
             TOTAL=$NEW_TOTAL
           done < /tmp/changed_files.txt
 
-          echo "Collected $(wc -c < /tmp/file_contents.txt) bytes of file contents"
-
-      - name: Run ChatGPT Review
-        if: steps.diff.outputs.skip != 'true'
+      - name: Call OpenAI API
+        if: steps.check_key.outputs.skip != 'true' && steps.diff.outputs.skip != 'true'
         id: review
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -92,77 +146,30 @@ jobs:
           PR_TITLE="${{ github.event.pull_request.title }}"
           PR_BODY=$(echo "${{ github.event.pull_request.body }}" | head -c 2000)
 
-          # Build the prompt
           SYSTEM_PROMPT='You are a senior Rust engineer reviewing a pull request for an ISMS (Information Security Management System) backend built with Actix-web 4 and MongoDB.
 
-          Your review must cover ALL of the following areas:
+          Review for: (1) Security vulnerabilities — auth bypass, NoSQL injection, secret exposure, input validation, CORS. (2) Rust best practices — no unwrap() in prod, proper error handling with ?, idiomatic ownership, serde correctness, async safety. (3) Logic bugs — race conditions, missing edge cases, incorrect MongoDB filters, JWT/RBAC correctness. (4) Performance — unnecessary allocations, N+1 queries, missing indexes.
 
-          ## 1. Security Vulnerabilities
-          - Authentication/authorization bypass opportunities
-          - Input validation gaps (SQL/NoSQL injection, XSS via stored data)
-          - Secret/credential exposure risks
-          - Insecure deserialization
-          - Missing rate limiting considerations
-          - CORS misconfiguration
-
-          ## 2. Rust Best Practices
-          - Idiomatic Rust patterns (ownership, borrowing, lifetimes)
-          - Proper error handling (no unwrap() in production paths, proper ? propagation)
-          - Unsafe code review (if any)
-          - Type safety and enum usage
-          - Serde derive correctness
-          - Proper use of async/await with actix-web
-
-          ## 3. Logic Bugs
-          - Off-by-one errors, boundary conditions
-          - Race conditions in async code
-          - Missing edge cases (empty collections, None values, deleted records)
-          - Incorrect MongoDB query filters
-          - JWT/RBAC logic correctness
-
-          ## 4. Performance
-          - Unnecessary allocations (String vs &str, Vec cloning)
-          - N+1 query patterns
-          - Blocking operations in async context (bcrypt is OK — it uses spawn_blocking internally)
-          - Missing database indexes for query patterns
-          - Unnecessary serialization/deserialization
-
-          ## Output Format
-          Structure your review as:
-
+          Format your review as:
           ### Summary
-          One paragraph overall assessment.
+          One paragraph.
+          ### Critical Issues (❌)
+          Must fix before merge.
+          ### Warnings (⚠️)
+          Should fix.
+          ### Suggestions (💡)
+          Nice-to-have.
+          ### Good Patterns (✅)
+          Things done well.
+          Omit empty sections. Reference file names and line numbers. Be concise.'
 
-          ### Critical Issues
-          Issues that MUST be fixed before merge. Use ❌ prefix.
-
-          ### Warnings
-          Issues that SHOULD be fixed. Use ⚠️ prefix.
-
-          ### Suggestions
-          Nice-to-have improvements. Use 💡 prefix.
-
-          ### Approved Patterns
-          Things done well worth noting. Use ✅ prefix.
-
-          If there are no issues in a category, omit that section.
-          Be specific — reference file names, line numbers, and code snippets.
-          Be concise — do not pad with generic advice.'
-
-          # Build the user message with jq to handle escaping
           USER_MSG=$(jq -n \
             --arg title "$PR_TITLE" \
             --arg body "$PR_BODY" \
             --arg diff "$DIFF" \
             --arg files "$FILE_CONTENTS" \
-            '{
-              pr_title: $title,
-              pr_description: $body,
-              diff: $diff,
-              full_file_contents: $files
-            } | "Review this Pull Request:\n\nTitle: \(.pr_title)\n\nDescription:\n\(.pr_description)\n\nDiff:\n```\n\(.diff)\n```\n\nFull file contents for context:\n```\n\(.full_file_contents)\n```"')
+            '"Review this PR:\n\nTitle: \($title)\n\nDescription:\n\($body)\n\nDiff:\n```\n\($diff)\n```\n\nFull files:\n```\n\($files)\n```"')
 
-          # Call OpenAI API
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             https://api.openai.com/v1/chat/completions \
             -H "Content-Type: application/json" \
@@ -184,78 +191,48 @@ jobs:
           BODY=$(echo "$RESPONSE" | sed '$d')
 
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "OpenAI API returned HTTP $HTTP_CODE"
-            echo "$BODY" | jq '.error' 2>/dev/null || echo "$BODY"
-            echo "review_failed=true" >> "$GITHUB_OUTPUT"
-            exit 0  # Don't fail the workflow, just skip posting
-          fi
-
-          # Extract the review content
-          REVIEW=$(echo "$BODY" | jq -r '.choices[0].message.content')
-          MODEL_USED=$(echo "$BODY" | jq -r '.model')
-          TOKENS_USED=$(echo "$BODY" | jq -r '.usage.total_tokens')
-
-          if [ -z "$REVIEW" ] || [ "$REVIEW" = "null" ]; then
-            echo "Empty response from OpenAI"
+            echo "OpenAI API error (HTTP $HTTP_CODE)"
             echo "review_failed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Save review to file
-          echo "$REVIEW" > /tmp/review.md
+          REVIEW=$(echo "$BODY" | jq -r '.choices[0].message.content')
+          MODEL_USED=$(echo "$BODY" | jq -r '.model')
+          TOKENS=$(echo "$BODY" | jq -r '.usage.total_tokens')
 
-          # Append metadata
-          echo "" >> /tmp/review.md
-          echo "---" >> /tmp/review.md
-          echo "*Reviewed by \`${MODEL_USED}\` | ${TOKENS_USED} tokens | Rust files only*" >> /tmp/review.md
+          if [ -z "$REVIEW" ] || [ "$REVIEW" = "null" ]; then
+            echo "review_failed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          {
+            echo "$REVIEW"
+            echo ""
+            echo "---"
+            echo "*Reviewed by \`${MODEL_USED}\` | ${TOKENS} tokens | Rust files only*"
+          } > /tmp/review.md
 
           echo "review_failed=false" >> "$GITHUB_OUTPUT"
-          echo "Review generated successfully ($TOKENS_USED tokens)"
 
-      - name: Post review comment on PR
-        if: steps.diff.outputs.skip != 'true' && steps.review.outputs.review_failed != 'true'
+      - name: Post ChatGPT review comment
+        if: steps.check_key.outputs.skip != 'true' && steps.diff.outputs.skip != 'true' && steps.review.outputs.review_failed != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Build the comment
-          COMMENT="## 🤖 AI Code Review (Rust Backend)
+          COMMENT="## 🤖 ChatGPT Code Review (Rust Backend)
 
           $(cat /tmp/review.md)"
 
-          # Check if we already posted a review comment on this PR
-          EXISTING_COMMENT_ID=$(gh api \
+          EXISTING=$(gh api \
             "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
-            --jq '.[] | select(.body | startswith("## 🤖 AI Code Review")) | .id' \
+            --jq '.[] | select(.body | startswith("## 🤖 ChatGPT Code Review")) | .id' \
             | head -1)
 
-          if [ -n "$EXISTING_COMMENT_ID" ]; then
-            # Update existing comment
+          if [ -n "$EXISTING" ]; then
             gh api \
-              "repos/${{ github.repository }}/issues/comments/$EXISTING_COMMENT_ID" \
-              -X PATCH \
-              -f body="$COMMENT"
-            echo "Updated existing review comment #$EXISTING_COMMENT_ID"
+              "repos/${{ github.repository }}/issues/comments/$EXISTING" \
+              -X PATCH -f body="$COMMENT"
           else
-            # Create new comment
             gh pr comment ${{ github.event.pull_request.number }} \
-              --repo ${{ github.repository }} \
-              --body "$COMMENT"
-            echo "Posted new review comment"
+              --repo ${{ github.repository }} --body "$COMMENT"
           fi
-
-      - name: Post skip notice
-        if: steps.diff.outputs.skip == 'true'
-        run: echo "No Rust file changes in this PR — skipping AI review."
-
-      - name: Post failure notice
-        if: steps.review.outputs.review_failed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh pr comment ${{ github.event.pull_request.number }} \
-            --repo ${{ github.repository }} \
-            --body "## 🤖 AI Code Review (Rust Backend)
-
-          > ⚠️ AI review could not be completed. The OpenAI API returned an error. Check the workflow logs for details.
-          >
-          > This does not block the PR — manual review is still required."
